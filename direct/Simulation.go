@@ -1,13 +1,13 @@
 package direct
 
 import (
+	"image"
 	"image/color"
-	"math"
 	"math/rand"
 	"sync"
 	"time"
 
-	"github.com/hajimehoshi/ebiten/v2"
+	"github.com/NikolayDPaev/n-body/body"
 )
 
 const (
@@ -15,88 +15,123 @@ const (
 )
 
 type Simulation struct {
-	p      int
-	res    int
-	bodies []*Body
-	mu     sync.Mutex
+	p   int
+	img *image.Paletted
+
+	// bodies
+	bodies  []*body.Body
+	channel []chan []*body.Body
+
+	// synchronizing the ticks
+	signal    chan struct{}
+	waitGroup *sync.WaitGroup
 }
 
-func NewSimulation(p, n, res int) *Simulation {
-	s := &Simulation{p, res, make([]*Body, n), sync.Mutex{}}
+func NewSimulation(p, n int) *Simulation {
+	s := &Simulation{p, nil, make([]*body.Body, n), make([]chan []*body.Body, p), make(chan struct{}, p), &sync.WaitGroup{}}
 	s.startthebodies()
+	for i := range s.channel {
+		s.channel[i] = make(chan []*body.Body, p-1)
+	}
+	// start the workers
+	for id := 0; id < s.p; id++ {
+		go s.worker(id)
+	}
 	return s
 }
 
-func (s *Simulation) Update(canvasImage *ebiten.Image) error {
-	translation := s.res / 2
-	for _, body := range s.bodies {
-		canvasImage.Set(translation+int(body.rx), translation+int(body.ry), body.color)
-		//s.canvasImage.
-		//g.fillOval((int) Math.round(bodies[i].rx*250/1e18),(int) Math.round(bodies[i].ry*250/1e18),8,8);
+func (s *Simulation) worker(id int) {
+	// take own bodies
+	//start := int(math.Floor(float64(len(s.bodies))/float64(s.p))) * id
+	start := len(s.bodies) / s.p * id
+	var local []*body.Body
+	if id == s.p-1 {
+		local = s.bodies[start:len(s.bodies)]
+	} else {
+		local = s.bodies[start : start+len(s.bodies)/s.p]
 	}
-	//go through the Brute Force algorithm (see the function below)
-	s.addforces()
-	return nil
+
+	//send own bodies to the others
+	for i := range s.channel {
+		if id != i {
+			s.channel[i] <- local
+		}
+	}
+
+	// loop
+	for {
+		// wait for signal
+		<-s.signal
+		// add local forces
+		for i := range local {
+			for j := range local {
+				if i != j {
+					local[i].AddForce(local[j])
+				}
+			}
+		}
+
+		// add foreign forces
+		for i := 0; i < s.p-1; i++ {
+			other := <-s.channel[id]
+			for i := range local {
+				for j := range other {
+					local[i].AddForce(other[j])
+				}
+			}
+		}
+
+		// update local bodies positions
+		// for i := range local {
+		// 	local[i].Update(timestep)
+		// 	if s.img != nil {
+		// 		local[i].ColorPixel(s.img)
+		// 	}
+		// 	local[i].ResetForce()
+		// }
+
+		// send the new local bodies positions to the others
+		for p := range s.channel {
+			if p != id {
+				s.channel[p] <- local
+			}
+		}
+		// signal that the work is done
+		s.waitGroup.Done()
+	}
 }
 
-func circlev(rx, ry float64) float64 {
-	r2 := math.Sqrt(rx*rx + ry*ry)
-	numerator := (6.67e-11) * 1e6 * solarmass
-	return math.Sqrt(numerator / r2)
+// master
+func (s *Simulation) Update(image *image.Paletted) error {
+	s.img = image
+	// start p workers
+	s.waitGroup.Add(s.p)
+	for i := 0; i < s.p; i++ {
+		// give starting signals to the workers
+		s.signal <- struct{}{}
+	}
+	// wait them all
+	s.waitGroup.Wait()
+
+	// update positions
+	for _, body := range s.bodies {
+		body.Update(timestep)
+		if s.img != nil {
+			body.ColorPixel(s.img)
+		}
+		body.ResetForce()
+	}
+	return nil
 }
 
 //Initialize N bodies with random positions and circular velocities
 func (s *Simulation) startthebodies() {
 	r := rand.New(rand.NewSource(time.Now().UnixNano()))
 
-	exp := func(lambda float64) float64 {
-		return -math.Log(1-r.Float64()) / lambda
-	}
-
-	//radius := 1e18 // radius of universe
-
 	for i := range s.bodies {
-		px := 1e8 * exp(-1.8) * (.5 - r.Float64())
-		py := 1e8 * exp(-1.8) * (.5 - r.Float64())
-		magv := circlev(px, py)
-		absangle := math.Atan(math.Abs(py / px))
-		thetav := math.Pi/2 - absangle
-		//phiv := r.Float64() * math.Pi
-		vx := -1 * math.Copysign(1.0, py) * math.Cos(thetav) * magv
-		vy := math.Copysign(1.0, px) * math.Sin(thetav) * magv
-		//Orient a random 2D circular orbit
-
-		if r.Float64() <= .5 {
-			vx = -vx
-			vy = -vy
-		}
-
-		mass := r.Float64()*solarmass*10 + 1e20
-		//Color the masses in green gradients by mass
-		red := uint8(mass * 254 / (solarmass*10 + 1e20))
-		blue := uint8(mass * 254 / (solarmass*10 + 1e20))
-		var green uint8 = 255
-		color := color.RGBA{red, green, blue, 0xff}
-		s.bodies[i] = NewBody(px, py, vx, vy, mass, color)
+		s.bodies[i] = body.NewRandomBody(r)
 	}
 	//Put the central mass in
-	s.bodies[0] = NewBody(0, 0, 0, 0, 1e6*solarmass, color.RGBA{255, 0, 0, 0xff}) //put a heavy body in the center
+	s.bodies[0] = body.NewCentralBody(1e6*body.SOLARMASS, color.RGBA{255, 0, 0, 0xff}) //put a heavy body.body in the center
 
-}
-
-//Use the method in Body to reset the forces, then add all the new forces
-func (s *Simulation) addforces() {
-	for i := range s.bodies {
-		s.bodies[i].resetForce()
-		//Notice-2 loops-->N^2 complexity
-		for j := range s.bodies {
-			if i != j {
-				s.bodies[i].addForce(s.bodies[j])
-			}
-		}
-	}
-	//Then, loop again and update the bodies using timestep dt
-	for i := range s.bodies {
-		s.bodies[i].update(timestep)
-	}
 }

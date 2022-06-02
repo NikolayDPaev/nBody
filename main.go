@@ -1,36 +1,82 @@
 package main
 
 import (
-	"log"
+	"flag"
+	"fmt"
+	"image"
+	"image/gif"
+	"math"
+	"os"
+	"time"
 
+	"github.com/NikolayDPaev/n-body/body"
 	"github.com/NikolayDPaev/n-body/direct"
-	"github.com/hajimehoshi/ebiten/v2"
+	"github.com/NikolayDPaev/n-body/pipeline"
 )
 
-const RESOLUTION = 600
-
-type Game struct {
-	simulation  *direct.Simulation
-	canvasImage *ebiten.Image
+type Simulation interface {
+	Update(image *image.Paletted) error
 }
 
-func (g *Game) Update() error {
-	return g.simulation.Update(g.canvasImage)
+func createGif(steps int, simulation Simulation) {
+	var w, h int = body.RESOLUTION, body.RESOLUTION
+
+	var images []*image.Paletted
+	var delays []int
+
+	for step := 0; step < steps; step++ {
+		img := image.NewPaletted(image.Rect(0, 0, w, h), body.Palette)
+		images = append(images, img)
+		delays = append(delays, 10)
+
+		simulation.Update(img)
+	}
+
+	f, _ := os.OpenFile("nBody.gif", os.O_WRONLY|os.O_CREATE, 0600)
+	defer f.Close()
+	gif.EncodeAll(f, &gif.GIF{
+		Image: images,
+		Delay: delays,
+	})
 }
 
-func (s *Game) Draw(screen *ebiten.Image) {
-	screen.DrawImage(s.canvasImage, nil)
-}
-
-func (s *Game) Layout(outsideWidth, outsideHeight int) (int, int) {
-	return RESOLUTION, RESOLUTION
+func test(simulation Simulation, steps int) int64 {
+	start := time.Now()
+	for i := 0; i < steps; i++ {
+		simulation.Update(nil)
+	}
+	return time.Since(start).Microseconds()
 }
 
 func main() {
-	ebiten.SetWindowSize(RESOLUTION, RESOLUTION)
-	ebiten.SetWindowTitle("nBody")
-	game := &Game{direct.NewSimulation(1, 100, RESOLUTION), ebiten.NewImage(RESOLUTION, RESOLUTION)}
-	if err := ebiten.RunGame(game); err != nil {
-		log.Fatal(err)
+	animPtr := flag.Bool("anim", false, "animation?")
+	pPtr := flag.Int("p", 1, "parallelism")
+	nPtr := flag.Int("n", 1000, "bodies count")
+	stepsPtr := flag.Int("steps", 1000, "steps count")
+	testsPtr := flag.Int("tests", 10, "tests count")
+	archPtr := flag.String("arch", "direct", "software architecture: direct or pipeline")
+	flag.Parse()
+
+	var simulation Simulation
+	if *archPtr == "direct" {
+		simulation = direct.NewSimulation(*pPtr, *nPtr)
+	} else if *archPtr == "pipeline" {
+		simulation = pipeline.NewSimulation(*pPtr, *nPtr)
+	} else {
+		fmt.Println("software architectures are direct and pipeline")
+	}
+
+	if *animPtr {
+		createGif(*stepsPtr, simulation)
+	} else {
+
+		var min int64 = math.MaxInt64
+		for i := 0; i < *testsPtr; i++ {
+			now := test(simulation, *stepsPtr)
+			if now < min {
+				min = now
+			}
+		}
+		fmt.Println(min)
 	}
 }
