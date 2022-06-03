@@ -25,24 +25,32 @@ type Simulation struct {
 	// synchronizing the ticks
 	signal    chan struct{}
 	waitGroup *sync.WaitGroup
+
+	// the local bodies of the master
+	masterLocal []*body.Body
 }
 
 func NewSimulation(p, n int) *Simulation {
-	s := &Simulation{p, nil, make([]*body.Body, n), make([]chan []*body.Body, p), make(chan struct{}, p), &sync.WaitGroup{}}
+	s := &Simulation{p, nil, make([]*body.Body, n), make([]chan []*body.Body, p), make(chan struct{}, p), &sync.WaitGroup{}, nil}
 	s.startthebodies()
 	for i := range s.channel {
 		s.channel[i] = make(chan []*body.Body, p-1)
 	}
-	// start the workers
-	for id := 0; id < s.p; id++ {
+	// start p-1 workers
+	for id := 1; id < s.p; id++ {
 		go s.worker(id)
+	}
+	s.masterLocal = s.getBodiesById(0)
+	//send master bodies to the others
+	for i := range s.channel {
+		if i != 0 {
+			s.channel[i] <- s.masterLocal
+		}
 	}
 	return s
 }
 
-func (s *Simulation) worker(id int) {
-	// take own bodies
-	//start := int(math.Floor(float64(len(s.bodies))/float64(s.p))) * id
+func (s *Simulation) getBodiesById(id int) []*body.Body {
 	start := len(s.bodies) / s.p * id
 	var local []*body.Body
 	if id == s.p-1 {
@@ -50,6 +58,40 @@ func (s *Simulation) worker(id int) {
 	} else {
 		local = s.bodies[start : start+len(s.bodies)/s.p]
 	}
+	return local
+}
+
+func (s *Simulation) work(id int, local []*body.Body) {
+	// add local forces
+	for i := range local {
+		for j := range local {
+			if i != j {
+				local[i].AddForce(local[j])
+			}
+		}
+	}
+
+	// add foreign forces
+	for i := 0; i < s.p-1; i++ {
+		other := <-s.channel[id]
+		for i := range local {
+			for j := range other {
+				local[i].AddForce(other[j])
+			}
+		}
+	}
+
+	// send the local bodies positions to the others
+	for p := range s.channel {
+		if p != id {
+			s.channel[p] <- local
+		}
+	}
+}
+
+func (s *Simulation) worker(id int) {
+	// take own bodies
+	local := s.getBodiesById(id)
 
 	//send own bodies to the others
 	for i := range s.channel {
@@ -62,40 +104,9 @@ func (s *Simulation) worker(id int) {
 	for {
 		// wait for signal
 		<-s.signal
-		// add local forces
-		for i := range local {
-			for j := range local {
-				if i != j {
-					local[i].AddForce(local[j])
-				}
-			}
-		}
 
-		// add foreign forces
-		for i := 0; i < s.p-1; i++ {
-			other := <-s.channel[id]
-			for i := range local {
-				for j := range other {
-					local[i].AddForce(other[j])
-				}
-			}
-		}
+		s.work(id, local)
 
-		// update local bodies positions
-		// for i := range local {
-		// 	local[i].Update(timestep)
-		// 	if s.img != nil {
-		// 		local[i].ColorPixel(s.img)
-		// 	}
-		// 	local[i].ResetForce()
-		// }
-
-		// send the new local bodies positions to the others
-		for p := range s.channel {
-			if p != id {
-				s.channel[p] <- local
-			}
-		}
 		// signal that the work is done
 		s.waitGroup.Done()
 	}
@@ -105,12 +116,16 @@ func (s *Simulation) worker(id int) {
 func (s *Simulation) Update(image *image.Paletted) error {
 	s.img = image
 	// start p workers
-	s.waitGroup.Add(s.p)
-	for i := 0; i < s.p; i++ {
+	s.waitGroup.Add(s.p - 1)
+	for i := 0; i < s.p-1; i++ {
 		// give starting signals to the workers
 		s.signal <- struct{}{}
 	}
-	// wait them all
+
+	// the master is also worker 0
+	s.work(0, s.masterLocal)
+
+	// wait the other workers
 	s.waitGroup.Wait()
 
 	// update positions
