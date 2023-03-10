@@ -25,5 +25,5 @@ The program outputs the time in microseconds
 ![](https://github.com/NikolayDPaev/nBody/blob/master/nBody.gif)
 
 ## Results
-Speedup on 16 processors and 3000 bodies
+Speedup on 16 processors and 3000 bodies  
 ![](https://github.com/NikolayDPaev/nBody/blob/master/Speedup.PNG)
